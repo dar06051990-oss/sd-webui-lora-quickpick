@@ -426,12 +426,21 @@ def _register(app: FastAPI):
                 if tag and base_tag != tag:
                     continue
                 for nm in name_variants(name):
-                    cand = os.path.join(base, rel, f"{nm}.{ext}")
-                    hit = try_send(cand)
-                    if hit: return hit
-                    for alt in (f"{nm}.{ext}".lower(), f"{nm}.{ext}".upper()):
-                        hit = try_send(os.path.join(base, rel, alt))
-                        if hit: return hit
+                    # Support both Forge-style previews:
+                    #   model.png
+                    # and common sidecars:
+                    #   model.preview.png
+                    for suffix in ("", ".preview"):
+                        filename = f"{nm}{suffix}.{ext}"
+                        cand = os.path.join(base, rel, filename)
+                        hit = try_send(cand)
+                        if hit:
+                            return hit
+
+                        for alt in (filename.lower(), filename.upper()):
+                            hit = try_send(os.path.join(base, rel, alt))
+                            if hit:
+                                return hit
         image_exts = {'.png', '.jpg', '.jpeg', '.webp'}
         for base in _get_lora_roots():
             base_depth = base.count(os.sep)
@@ -439,12 +448,22 @@ def _register(app: FastAPI):
                 if cur.count(os.sep) - base_depth > 6:
                     continue
                 for nm in name_variants(name):
+                    accepted_stems = {nm.lower(), f"{nm}.preview".lower()}
                     for f in files:
                         stem, file_ext = os.path.splitext(f)
-                        if stem.lower() == nm.lower() and file_ext.lower() in image_exts:
-                            p1 = os.path.join(cur, f"{nm}.{ext}")
+                        if stem.lower() in accepted_stems and file_ext.lower() in image_exts:
+                            # Prefer the exact extension requested by the UI,
+                            # checking both model.ext and model.preview.ext.
+                            for suffix in ("", ".preview"):
+                                p1 = os.path.join(cur, f"{nm}{suffix}.{ext}")
+                                if os.path.exists(p1):
+                                    return FileResponse(
+                                        p1,
+                                        headers={'Cache-Control':'public, max-age=604800'}
+                                    )
+
                             return FileResponse(
-                                p1 if os.path.exists(p1) else os.path.join(cur, f),
+                                os.path.join(cur, f),
                                 headers={'Cache-Control':'public, max-age=604800'}
                             )
         return Response(status_code=404)
