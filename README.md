@@ -1,6 +1,22 @@
 # LoRA QuickPick
 
 LoRA QuickPick is a visual LoRA picker extension for Stable Diffusion WebUI environments.
+## Preview sidecar compatibility fix
+
+This fork adds support for LoRA preview images using `.preview` sidecar filenames.
+
+Supported examples:
+
+- `model.preview.png`
+- `model.preview.jpg`
+- `model.preview.jpeg`
+- `model.preview.webp`
+
+The original preview naming (`model.png`, `model.jpg`, etc.) remains supported.
+
+Based on the original project by abzaloff.
+
+---
 
 <img width="899" height="604" alt="8689" src="https://github.com/user-attachments/assets/2fe3138e-54fe-45d2-9750-62b22d4d18f0" />
 
