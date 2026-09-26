@@ -161,16 +161,22 @@ def _normalize_words(raw):
 
 def _load_triggers_from_json(p):
     try:
-        with open(p,'r',encoding='utf-8') as f: data = json.load(f)
+        with open(p,'r',encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Preferred weight is independent from trigger words.
+        pref = float(data.get('preferred weight', data.get('preferred_weight', 0)) or 0)
+
+        # Only explicit activation / trigger fields are valid prompt triggers.
+        # Do NOT fall back to description/notes: those are human-readable
+        # metadata and may contain sentences or HTML.
         for k in ('activation text','activation_text','activation','trigger','trigger_words','trainedWords','triggerWords'):
-            if k in data: 
-                return _normalize_words(data[k]), float(data.get('preferred weight', data.get('preferred_weight', 0)) or 0)
-        for k in ('description','notes'):
             if k in data:
-                words = _normalize_words(data[k])
-                if words: return words, float(data.get('preferred weight', data.get('preferred_weight', 0)) or 0)
-    except: pass
-    return [], 0.0
+                return _normalize_words(data[k]), pref
+
+        return [], pref
+    except:
+        return [], 0.0
 
 def _load_sidecars(dirp, filep):
     name, ext = os.path.splitext(filep)
