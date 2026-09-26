@@ -271,6 +271,154 @@
     let contextMenu = null;
     let refreshMenuData = null;
     const selected = new Map();
+    // Each selected LoRA owns its own visible prompt fragment. This lets every
+    // newly selected LoRA be inserted at the CURRENT prompt caret instead of
+    // rebuilding all selected LoRAs as one block beside the first one.
+    const promptEntries = new Map();
+    let lastPromptCaret = null;
+    let promptCaretKnown = false;
+    let syncingPrompt = false;
+
+    function rememberPromptCaret(ta){
+      if (!ta || syncingPrompt) return;
+      const pos = Number.isInteger(ta.selectionStart) ? ta.selectionStart : (ta.value || "").length;
+      lastPromptCaret = pos;
+      promptCaretKnown = true;
+    }
+
+    function ensurePromptCaretTracking(ta){
+      if (!ta || ta.dataset.lqpCaretTracking === "1") return;
+      ta.dataset.lqpCaretTracking = "1";
+      ["focus", "click", "keyup", "select", "input"].forEach(evt => {
+        ta.addEventListener(evt, () => rememberPromptCaret(ta));
+      });
+    }
+
+    function formatPromptWeight(value){
+      const n = clamp(Number(value), WEIGHT_MIN, WEIGHT_MAX);
+      return Number.isFinite(n) ? String(Number(n.toFixed(2))) : "1";
+    }
+
+    function buildPromptCore(name, obj){
+      const weight = (obj && typeof obj.w === "number") ? obj.w : 1.0;
+      const triggers = (State.triggers && State.triggers[name]) || [];
+      const chunk = [`<lora:${name}:${formatPromptWeight(weight)}>`];
+      triggers.forEach(word => {
+        const w = String(word || "").trim();
+        if (w) chunk.push(w);
+      });
+      // Match Forge's normal Extra Networks style:
+      // <lora:name:weight>, trigger,
+      return chunk.join(", ") + ",";
+    }
+
+    function findPromptEntry(value, entry){
+      if (!entry || !entry.text) return -1;
+      if (
+        Number.isInteger(entry.start) &&
+        entry.start >= 0 &&
+        value.slice(entry.start, entry.start + entry.text.length) === entry.text
+      ) return entry.start;
+      return value.indexOf(entry.text);
+    }
+
+    function syncSelectedToPrompt(){
+      const ta = qs(`#${tabForTheme}_prompt textarea`);
+      if (!ta) return;
+      ensurePromptCaretTracking(ta);
+
+      let value = ta.value || "";
+      let caret = promptCaretKnown && Number.isInteger(lastPromptCaret)
+        ? Math.max(0, Math.min(lastPromptCaret, value.length))
+        : value.length;
+
+      // 1) Remove prompt fragments for deleted/disabled LoRAs.
+      for (const [name, entry] of Array.from(promptEntries.entries())) {
+        const obj = selected.get(name);
+        if (obj && obj.on !== false) continue;
+
+        const at = findPromptEntry(value, entry);
+        if (at >= 0) {
+          value = value.slice(0, at) + value.slice(at + entry.text.length);
+          if (at < caret) caret = Math.max(at, caret - entry.text.length);
+          entry.start = at;
+        }
+
+        if (!obj) {
+          promptEntries.delete(name);
+        } else {
+          entry.text = "";
+          promptEntries.set(name, entry);
+        }
+      }
+
+      // 2) Update already-visible LoRAs in place (for weight changes, etc.).
+      selected.forEach((obj, name) => {
+        if (!obj || obj.on === false) return;
+
+        const entry = promptEntries.get(name);
+        if (!entry || !entry.text) return;
+
+        const at = findPromptEntry(value, entry);
+        if (at < 0) {
+          // The user may have manually edited/deleted this fragment.
+          // Treat it as missing and reinsert it at the current caret below.
+          entry.text = "";
+          entry.start = null;
+          promptEntries.set(name, entry);
+          return;
+        }
+
+        const core = buildPromptCore(name, obj);
+        const nextText = (entry.lead || "") + core + (entry.trail || "");
+        if (nextText !== entry.text) {
+          const oldLen = entry.text.length;
+          value = value.slice(0, at) + nextText + value.slice(at + oldLen);
+          if (at < caret) caret += nextText.length - oldLen;
+          entry.text = nextText;
+        }
+        entry.start = at;
+        promptEntries.set(name, entry);
+      });
+
+      // 3) Every newly selected LoRA is inserted independently at the caret
+      // that was last used in the positive prompt.
+      selected.forEach((obj, name) => {
+        if (!obj || obj.on === false) return;
+
+        let entry = promptEntries.get(name);
+        if (entry && entry.text) return;
+
+        const insertAt = Math.max(0, Math.min(caret, value.length));
+        const before = value.slice(0, insertAt);
+        const after = value.slice(insertAt);
+        const core = buildPromptCore(name, obj);
+
+        const lead = before && !/\s$/.test(before) ? " " : "";
+        const trail = after && !/^\s/.test(after) ? " " : "";
+        const inserted = lead + core + trail;
+
+        value = before + inserted + after;
+        entry = { text: inserted, start: insertAt, lead, trail };
+        promptEntries.set(name, entry);
+
+        // Put the caret after THIS LoRA. If the user later clicks somewhere
+        // else in Prompt before selecting another LoRA, that new location wins.
+        caret = insertAt + inserted.length;
+      });
+
+      if (ta.value !== value) {
+        syncingPrompt = true;
+        ta.value = value;
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        syncingPrompt = false;
+      }
+
+      try { ta.setSelectionRange(caret, caret); } catch(_){}
+      lastPromptCaret = caret;
+      promptCaretKnown = true;
+    }
+
     let lastFolder = localStorage.getItem(LS_KEYS.lastFolder) || "";
     let favorites = getFavorites();
     let presets = readPresets();
@@ -419,6 +567,7 @@
 
     function renderBox() {
       syncThemeVars();
+      syncSelectedToPrompt();
       box.innerHTML = "";
       const actions = el("div", { class: "lqp-actions" });
       const addBtn = (title, text, onClick) => {
@@ -521,7 +670,10 @@
             obj.w = nw; selected.set(name, obj);
             wt.textContent = nw.toFixed(2);
           });
-          document.addEventListener("mouseup", () => (dragging = false));
+          document.addEventListener("mouseup", () => {
+            if (dragging) syncSelectedToPrompt();
+            dragging = false;
+          });
 
           const openWeightPopover = (e) => {
             e.preventDefault();
@@ -536,6 +688,7 @@
               selected.set(name, obj);
               wt.textContent = obj.w.toFixed(2);
               value.textContent = obj.w.toFixed(2);
+              syncSelectedToPrompt();
             };
             slider.addEventListener("input", applyWeight);
             popover.addEventListener("pointerdown", ev => ev.stopPropagation());
@@ -567,6 +720,7 @@
             const obj = selected.get(name) || {w:1,on:true};
             obj.on = chk.checked; selected.set(name, obj);
             chip.classList.toggle("off", !chk.checked);
+            syncSelectedToPrompt();
           });
 
           chip.addEventListener("dragstart", (e) => { dragName = name; e.dataTransfer.effectAllowed = "move"; });
@@ -1002,20 +1156,22 @@
 
   function buildAugmentedPrompt(original, selected){
     let res = original;
-    const triggers = [];
-    selected.forEach(({name}) => {
-      const arr = (window._lqpState && window._lqpState.triggers && window._lqpState.triggers[name]) || [];
-      arr.forEach(w => { if (w && !triggers.includes(w)) triggers.push(w); });
-    });
-    const low = res.toLowerCase();
-    const toAdd = triggers.filter(w => w && !low.includes(w.toLowerCase()));
-    if (toAdd.length){
-      const sep = res.trim().length ? (res.trim().endsWith(",") ? " " : ", ") : "";
-      res = res + sep + toAdd.join(", ");
-    }
     selected.forEach(({name, weight}) => {
-      const tok = `<lora:${name}:${weight.toFixed(2)}>`;
-      if (!res.includes(tok)) res = (res.trim() + " " + tok).trim();
+      const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const loraRe = new RegExp(`<lora:${esc}:[^>]+>`, "i");
+      if (!loraRe.test(res)) {
+        const tok = `<lora:${name}:${Number(weight).toFixed(2)}>`;
+        const sep = res.trim().length ? (res.trim().endsWith(",") ? " " : ", ") : "";
+        res = res + sep + tok;
+      }
+
+      const arr = (window._lqpState && window._lqpState.triggers && window._lqpState.triggers[name]) || [];
+      const low = res.toLowerCase();
+      const toAdd = arr.filter(w => w && !low.includes(String(w).toLowerCase()));
+      if (toAdd.length){
+        const sep = res.trim().length ? (res.trim().endsWith(",") ? " " : ", ") : "";
+        res = res + sep + toAdd.join(", ");
+      }
     });
     return res;
   }
@@ -1026,7 +1182,8 @@
       const ta = qs(selector);
       if (ta && !fields.includes(ta)) fields.push(ta);
     };
-    add(`#${tab}_prompt textarea`);
+    // The main positive prompt is permanently synchronized by QuickPick.
+    // Keep temporary injection only for a separate Hires prompt field.
     if (tab === "txt2img") add("#txt2img_hr_prompt textarea");
     return fields;
   }
